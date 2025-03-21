@@ -1,0 +1,9 @@
+name: RemoteBox
+version: ${version}
+main: com.noasaba.remotebox.RemoteBoxPlugin
+api-version: 1.21
+commands:
+  registeritem:
+    description: 手に持ったブロックを登録する
+  unregisteritem:
+    description: 登録を解除する

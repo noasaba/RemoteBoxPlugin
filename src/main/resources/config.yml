@@ -1,0 +1,14 @@
+messages:
+  prefix: "&7[RemoteBox] "
+  registered: "&aブロックを登録しました。"
+  unregistered: "&a登録を解除しました。"
+  notFound: "&c登録されたブロックがありません。"
+  placed: "&aブロックを消費して設置しました。"
+  noItemInInventory: "&cシュルカーボックスにもインベントリにも登録ブロックがありません。"
+  notUsableItem: "&cこのアイテムは使用できません。"
+
+maxRegisteredBlocks: 1
+
+# debugモード
+# true の時だけ、シュルカーボックスから消費した・インベントリから消費した 等の内部メッセージを表示
+debug: false
