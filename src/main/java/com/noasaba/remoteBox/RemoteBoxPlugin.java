@@ -16,6 +16,7 @@ import org.bukkit.event.Listener;
 import org.bukkit.event.block.BlockPlaceEvent;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.PlayerInventory;
 import org.bukkit.inventory.meta.BlockStateMeta;
 import org.bukkit.plugin.java.JavaPlugin;
 
@@ -23,28 +24,33 @@ import java.io.File;
 import java.io.IOException;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 /**
- * RemoteBoxPlugin
+ * RemoteBoxPlugin - 最終版 (PlayerInventory 使用版)
  *
- * 要点:
- *  - "使用できないアイテム"を登録しようとした場合はエラーメッセージを出して登録しない
- *  - シュルカーボックスから優先的に消費、それが無い場合はインベントリから消費
- *  - メインハンドのアイテムは減らさない(何度でも置けるように見える)
- *  - debugモードがfalseのとき、内部メッセージは表示しない
- *  - data.ymlに登録情報を保存、config.ymlはメッセージや設定のみ
+ * 主な特徴:
+ * - /registeritem: 手に持ったアイテムを登録 (ブロック or 特定作物)
+ * - /unregisteritem: 登録を解除
+ * - 登録されたアイテムを置こうとすると:
+ *    1) BlockPlaceEventをキャンセル → サーバー標準のアイテム消費を止める
+ *    2) シュルカーボックス > インベントリ(手持ち以外) の順に 1個消費
+ *    3) 成功したら 1tick後にブロックを強制設置 (手持ちスロットは消費しない)
+ * - data.yml にユーザーデータを保存 (再起動後も保持)
+ * - config.yml に debug: true のときのみ内部メッセージを表示
+ * - どんな状況でも増殖バグが起こらない設計
  */
 public final class RemoteBoxPlugin extends JavaPlugin implements Listener {
 
-    // プレイヤーごとの登録アイテム(1種)
+    // プレイヤーごとに1つの登録アイテム
     private final Map<UUID, ItemStack> registeredBlocks = new HashMap<>();
 
-    // data.yml
+    // data.yml 用
     private File dataFile;
     private YamlConfiguration dataConfig;
 
-    // config.yml から読み込む設定/メッセージ
+    // config.yml から読み込むメッセージ/設定
     private String prefix;
     private String msgRegistered;
     private String msgUnregistered;
@@ -52,17 +58,27 @@ public final class RemoteBoxPlugin extends JavaPlugin implements Listener {
     private String msgPlaced;
     private String msgNoItemInInv;
     private String msgNotUsable;
-
     private int maxRegisteredBlocks;
-    private boolean debug;  // debugモードフラグ
+    private boolean debug;
+
+    // ブロック以外でも使用可能にしたい作物など
+    private static final Set<Material> ALLOWED_PLANTABLE = Set.of(
+            Material.WHEAT_SEEDS,
+            Material.MELON_SEEDS,
+            Material.PUMPKIN_SEEDS,
+            Material.BEETROOT_SEEDS,
+            Material.CARROT,
+            Material.POTATO,
+            Material.BAMBOO
+    );
 
     @Override
     public void onEnable() {
-        // config.yml 初回展開
+        // config.yml 展開
         saveDefaultConfig();
         loadPluginConfig();
 
-        // data.yml 準備
+        // data.yml セットアップ
         setupDataFile();
         loadDataFile();
 
@@ -72,29 +88,29 @@ public final class RemoteBoxPlugin extends JavaPlugin implements Listener {
 
     @Override
     public void onDisable() {
-        // 停止時にデータ保存
+        // 停止時にユーザーデータ保存
         saveDataFile();
     }
 
     /**
-     * config.yml からメッセージ/設定を読み込む
+     * config.yml から各種設定値を読み込み
      */
     private void loadPluginConfig() {
         FileConfiguration config = getConfig();
-        this.prefix = config.getString("messages.prefix", "§7[RemoteBox] ");
-        this.msgRegistered = config.getString("messages.registered", "§aブロックを登録しました。");
-        this.msgUnregistered = config.getString("messages.unregistered", "§a登録を解除しました。");
-        this.msgNotFound = config.getString("messages.notFound", "§c登録されたブロックがありません。");
-        this.msgPlaced = config.getString("messages.placed", "§aブロックを消費して設置しました。");
-        this.msgNoItemInInv = config.getString("messages.noItemInInventory", "§cシュルカーボックスにもインベントリにも登録ブロックがありません。");
-        this.msgNotUsable = config.getString("messages.notUsableItem", "§cこのアイテムは使用できません。");
+        prefix = config.getString("messages.prefix", "§7[RemoteBox] ");
+        msgRegistered = config.getString("messages.registered", "§aブロックを登録しました。");
+        msgUnregistered = config.getString("messages.unregistered", "§a登録を解除しました。");
+        msgNotFound = config.getString("messages.notFound", "§c登録されたブロックがありません。");
+        msgPlaced = config.getString("messages.placed", "§aブロックを消費して設置しました。");
+        msgNoItemInInv = config.getString("messages.noItemInInventory", "§cシュルカーボックスにもインベントリにも登録ブロックがありません。");
+        msgNotUsable = config.getString("messages.notUsableItem", "§cこのアイテムは使用できません。");
 
-        this.maxRegisteredBlocks = config.getInt("maxRegisteredBlocks", 1);
-        this.debug = config.getBoolean("debug", false);  // デバッグモード
+        maxRegisteredBlocks = config.getInt("maxRegisteredBlocks", 1);
+        debug = config.getBoolean("debug", false);
     }
 
     /**
-     * data.yml のファイル準備
+     * data.yml のセットアップ
      */
     private void setupDataFile() {
         dataFile = new File(getDataFolder(), "data.yml");
@@ -103,20 +119,20 @@ public final class RemoteBoxPlugin extends JavaPlugin implements Listener {
                 getDataFolder().mkdirs();
                 dataFile.createNewFile();
             } catch (IOException e) {
-                getLogger().severe("data.yml作成に失敗: " + e.getMessage());
+                getLogger().severe("data.yml の作成に失敗: " + e.getMessage());
             }
         }
         dataConfig = new YamlConfiguration();
     }
 
     /**
-     * data.yml から読み込み
+     * data.yml を読み込み
      */
     private void loadDataFile() {
         try {
             dataConfig.load(dataFile);
         } catch (IOException | InvalidConfigurationException e) {
-            getLogger().severe("data.yml読み込み失敗: " + e.getMessage());
+            getLogger().severe("data.yml の読み込みに失敗: " + e.getMessage());
             return;
         }
         if (!dataConfig.isConfigurationSection("registeredItems")) return;
@@ -128,13 +144,13 @@ public final class RemoteBoxPlugin extends JavaPlugin implements Listener {
                 ItemStack stack = ItemStack.deserialize(map);
                 registeredBlocks.put(uuid, stack);
             } catch (Exception e) {
-                getLogger().warning("登録データ読み込み失敗: " + key + " => " + e.getMessage());
+                getLogger().warning("登録ブロック読み込み失敗: " + key + " => " + e.getMessage());
             }
         }
     }
 
     /**
-     * data.yml に書き込み
+     * data.yml に registeredBlocks を保存
      */
     private void saveDataFile() {
         dataConfig.set("registeredItems", null);
@@ -148,7 +164,7 @@ public final class RemoteBoxPlugin extends JavaPlugin implements Listener {
         try {
             dataConfig.save(dataFile);
         } catch (IOException e) {
-            getLogger().severe("data.yml保存失敗: " + e.getMessage());
+            getLogger().severe("data.yml の保存に失敗: " + e.getMessage());
         }
     }
 
@@ -158,7 +174,7 @@ public final class RemoteBoxPlugin extends JavaPlugin implements Listener {
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         if (!(sender instanceof Player)) {
-            sender.sendMessage("プレイヤーのみ使用できます。");
+            sender.sendMessage("このコマンドはプレイヤーのみ使用できます。");
             return true;
         }
         Player player = (Player) sender;
@@ -178,23 +194,20 @@ public final class RemoteBoxPlugin extends JavaPlugin implements Listener {
 
     /**
      * /registeritem
-     *  - 使用できないアイテムは登録できない
-     *  - ここでは "ブロックとして設置可能なもの" だけ登録OKという想定例
+     *  - ブロック or ALLOWED_PLANTABLE に含まれるアイテムのみ登録可
      */
     private void handleRegisterItem(Player player, UUID uuid) {
         ItemStack hand = player.getInventory().getItemInMainHand();
         if (hand == null || hand.getType() == Material.AIR) {
-            player.sendMessage(prefix + "登録するブロックを手に持ってください。");
+            player.sendMessage(prefix + "登録するアイテムを手に持ってください。");
             return;
         }
-        // 例えば "ブロックである" ことを条件に "使用可能" とする例
-        // isBlock() メソッドが無い古いバージョンの場合はMaterialカテゴリなどで判定する必要あり
-        if (!hand.getType().isBlock()) {
+        // 使用できるアイテムかチェック
+        if (!isUsableItem(hand.getType())) {
             player.sendMessage(prefix + msgNotUsable);
             return;
         }
 
-        // maxRegisteredBlocks = 1 の簡易実装: 既にあっても上書き
         ItemStack toRegister = hand.clone();
         toRegister.setAmount(1);
 
@@ -217,60 +230,68 @@ public final class RemoteBoxPlugin extends JavaPlugin implements Listener {
     }
 
     /**
+     * アイテムがブロック、または ALLOWED_PLANTABLE に含まれるか判定
+     */
+    private boolean isUsableItem(Material mat) {
+        return mat.isBlock() || ALLOWED_PLANTABLE.contains(mat);
+    }
+
+    /**
      * ブロック設置イベント
-     *  - 登録ブロックを置こうとしたらキャンセルし、1tick後に置く
-     *  - アイテムはメインハンドを減らさず、シュルカーボックス→インベントリ の順に消費
+     *   - 登録されたアイテムならイベントキャンセルし、独自に在庫を1個消費 → 次のtickで設置
+     *   - メインハンドスロットは消費しない
      */
     @EventHandler
     public void onBlockPlace(BlockPlaceEvent event) {
         Player player = event.getPlayer();
         UUID uuid = player.getUniqueId();
 
-        // 登録がなければ無視
+        // 登録なしの場合スルー
         if (!registeredBlocks.containsKey(uuid)) return;
 
-        ItemStack registeredItem = registeredBlocks.get(uuid);
+        ItemStack regItem = registeredBlocks.get(uuid);
         ItemStack inHand = event.getItemInHand();
 
-        // 持ちアイテムが登録ブロックと一致しないなら無視
-        if (!inHand.isSimilar(registeredItem)) return;
+        // 登録ブロックか
+        if (!inHand.isSimilar(regItem)) return;
 
-        // キャンセル(サーバー標準の消費を止める)
+        // 通常の置き方をキャンセル → 無限増殖防止
         event.setCancelled(true);
 
-        // シュルカーボックスを最優先で消費
-        boolean consumed = tryConsumeInShulkers(player, registeredItem);
+        // シュルカボックス優先で消費
+        boolean consumed = tryConsumeInShulkers(player, regItem);
 
-        // シュルカに無ければインベントリから消費
+        // シュルカになければインベントリ(ただしメインハンドは除外)から消費
         if (!consumed) {
-            consumed = tryConsumeInventory(player, registeredItem);
+            consumed = tryConsumeInventory(player, regItem);
         }
 
-        // 見つからなければ置けない
         if (!consumed) {
             player.sendMessage(prefix + msgNoItemInInv);
             return;
         }
 
         // 消費成功 → 1tick後に設置
-        final Block blockToSet = event.getBlock();
-        final Material placeMaterial = registeredItem.getType();
+        final Block placedBlock = event.getBlock();
+        final Material placeMat = regItem.getType();
 
         Bukkit.getScheduler().runTask(this, () -> {
-            blockToSet.setType(placeMaterial);
+            placedBlock.setType(placeMat);
             player.sendMessage(prefix + msgPlaced);
         });
     }
 
     /**
-     * シュルカーボックスから最優先で消費
-     *  debugモードがtrueの時のみ "シュルカーボックスから消費しました" 的なログを出す
+     * シュルカボックスから1個消費
+     *  debug=true なら内部メッセージを出す
      */
     private boolean tryConsumeInShulkers(Player player, ItemStack target) {
-        Inventory inv = player.getInventory();
-        for (int i = 0; i < inv.getSize(); i++) {
-            ItemStack box = inv.getItem(i);
+        PlayerInventory pInv = player.getInventory();
+        for (int i = 0; i < pInv.getSize(); i++) {
+            ItemStack box = pInv.getItem(i);
             if (box == null) continue;
+
+            // シュルカーボックス判定
             if (Tag.SHULKER_BOXES.isTagged(box.getType())) {
                 if (!(box.getItemMeta() instanceof BlockStateMeta)) continue;
                 BlockStateMeta meta = (BlockStateMeta) box.getItemMeta();
@@ -282,8 +303,7 @@ public final class RemoteBoxPlugin extends JavaPlugin implements Listener {
                 for (int slot = 0; slot < shulkerInv.getSize(); slot++) {
                     ItemStack content = shulkerInv.getItem(slot);
                     if (content != null && content.isSimilar(target)) {
-                        consumeItem(shulkerInv, slot);
-
+                        consumeOneItem(shulkerInv, slot);
                         shulker.update();
                         meta.setBlockState(shulker);
                         box.setItemMeta(meta);
@@ -300,22 +320,23 @@ public final class RemoteBoxPlugin extends JavaPlugin implements Listener {
     }
 
     /**
-     * インベントリ(手持ち以外)から消費
-     *  debugモードがtrueの時のみ内部メッセージを出す
+     * インベントリ(手持ちスロット以外)から1個消費
+     *  debug=true なら内部メッセージを表示
      */
     private boolean tryConsumeInventory(Player player, ItemStack target) {
-        Inventory inv = player.getInventory();
-        for (int i = 0; i < inv.getSize(); i++) {
-            ItemStack slotItem = inv.getItem(i);
-            if (slotItem == null) continue;
+        PlayerInventory pInv = player.getInventory();
+        int handSlot = pInv.getHeldItemSlot(); // メインハンドスロット
 
-            // メインハンドをスキップ(手持ちは減らさない)
-            if (i == player.getInventory().getHeldItemSlot()) {
+        for (int i = 0; i < pInv.getSize(); i++) {
+            // メインハンドは消費しない
+            if (i == handSlot) {
                 continue;
             }
+            ItemStack slotItem = pInv.getItem(i);
+            if (slotItem == null) continue;
 
             if (slotItem.isSimilar(target)) {
-                consumeItem(inv, i);
+                consumeOneItem(pInv, i);
                 if (debug) {
                     player.sendMessage(prefix + "§7(インベントリから使用されました)");
                 }
@@ -326,15 +347,15 @@ public final class RemoteBoxPlugin extends JavaPlugin implements Listener {
     }
 
     /**
-     * スロットのアイテムを1個消費
+     * 指定スロットのアイテムを1個消費
      */
-    private void consumeItem(Inventory inv, int slot) {
+    private void consumeOneItem(Inventory inv, int slot) {
         ItemStack item = inv.getItem(slot);
         if (item == null) return;
 
-        int amount = item.getAmount();
-        if (amount > 1) {
-            item.setAmount(amount - 1);
+        int amt = item.getAmount();
+        if (amt > 1) {
+            item.setAmount(amt - 1);
         } else {
             inv.setItem(slot, null);
         }
